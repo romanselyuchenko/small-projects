@@ -1,54 +1,96 @@
-from fastapi import FastAPI, Depends, status, HTTPException
-from pydantic import BaseModel, Field
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from passlib.context import CryptContext
+from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from databases import Database
+from pydantic import BaseModel
 
-app = FastAPI()
-security = HTTPBasic()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+DATABASE_URL = "postgresql://myuser:123@localhost/mydatabase"
 
+database = Database(DATABASE_URL)
 
 class UserBase(BaseModel):
-    username: str = Field(..., min_length=1, max_length=10) 
+    username: str
+    email: str
 
-class User(UserBase):   # чтобы получять данные от пользователя
-    password: str = Field(..., min_length=1, max_length=10)
+class UserCreate(UserBase):
+    """"""
 
-class UserInDB(UserBase):     # чтобы внутри не было незашифрованных данных
-    hashed_password: str = Field(...,)
-
-# Симуляция базы данных в виде списка объектов пользователей
-USER_DATA: list[UserInDB] = []
+class UserReturn(UserBase):
+    id: int
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.connect()
+    yield
+    await database.disconnect()
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+app = FastAPI(lifespan=lifespan)
 
-def get_user_from_db(username: str) -> UserInDB | None:
-    for user in USER_DATA:
-        if user.username == username:
-            return user
-    return None
-
-def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)):   # выводит js окошко для ввода
-    user = get_user_from_db(credentials.username)   # получаем из бд юзера с которым будем работать
+@app.post('/createuser', response_model=UserReturn)
+async def create_user(user: UserCreate):
+    query = '''
+    INSERT INTO users (username, email)
+    VALUES (:username, :email)
+    RETURNING id
+    '''
+    try:
+        user_id = await database.execute(
+            query=query,
+            values=user.model_dump()
+        )
+        return UserReturn(id=user_id, **user.model_dump(mode='json'))
+    except Exception as e:
+        raise HTTPException(status_code=400)
     
-    if user is None or not verify_password(credentials.password, user.hashed_password): #plain VS hash
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, 
-                            detail="Invalid credentials", 
-                            headers={"WWW-Authenticate": "Basic"})
-    return user
-
-
-@app.get("/login")
-def login(user: User = Depends(authenticate_user)): # вся логика в функции
-
-    return {"message": "You have access to the protected resource!", "user_info": user}
-
-@app.post("/registration")
-def user_registration(user: User):
-    USER_DATA.append(UserInDB(username = user.username, hashed_password = get_password_hash(user.password)))
-    return {"message": "You have accessfully registered!", "user_info": user}
+@app.get('/users')
+async def get_users():
+    try:
+        result = await database.fetch_all(
+            """
+            SELECT * FROM users;
+        """
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=404)
+    
+@app.put('/change_user', response_model=UserReturn)
+async def change_user(user: UserReturn):
+    query = """
+        UPDATE users
+        SET username = :username, email = :email
+        WHERE id = :user_id
+        RETURNING id
+    """
+    values = {
+        'username': user.username,
+        'email': user.email,
+        'user_id': user.id
+    }
+    try:
+        result = await database.execute(
+            query=query, values=values
+        )
+        return UserReturn(**values, id=result)
+    except Exception as e:
+        raise HTTPException(status_code=404)
+    
+@app.delete('/delete_user')
+async def delete_user(user_id: int):
+    query = """
+        DELETE FROM users 
+        WHERE id = :user_id
+        RETURNING id
+    """
+    values = {
+        'user_id': user_id
+    }
+    try:
+        result = await database.execute(
+            query=query, values=values
+        )
+        if not result:
+            raise HTTPException(status_code=500, detail='User is not found.')
+        return f'User with ID {result} is deleted.'
+    except Exception as e:
+        raise HTTPException(status_code=404)
