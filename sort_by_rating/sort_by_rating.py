@@ -4,7 +4,7 @@
 Ctrl+C и запустить снова: обработанные тайтлы пропустятся.
 
 Примеры:
-  python sort_by_rating.py
+  python sort_by_rating.py --clean
   python sort_by_rating.py --max-pages 10 --workers 3
   python sort_by_rating.py --retry-failed
   python sort_by_rating.py --refresh --max-pages 2
@@ -56,11 +56,15 @@ def arguments():
     parser.add_argument("--output", type=Path, default=Path("ratings.csv"))
     parser.add_argument("--retry-failed", action="store_true", help="повторить страницы с ошибками")
     parser.add_argument("--refresh", action="store_true", help="перезагрузить все найденные тайтлы")
+    parser.add_argument("--clean", action="store_true", help="очистить базу данных и начать сбор с чистого листа")
     return parser.parse_args()
 
 
-def database(path):
+def database(path, clean=False):
     conn = sqlite3.connect(path)
+    if clean:
+        conn.execute("DROP TABLE IF EXISTS manga")
+        conn.commit()
     conn.execute("""CREATE TABLE IF NOT EXISTS manga (
         path TEXT PRIMARY KEY, title TEXT NOT NULL, rating REAL, chapters INTEGER,
         description TEXT, status TEXT NOT NULL DEFAULT 'pending',
@@ -225,7 +229,7 @@ def main():
         raise SystemExit("--max-pages должен быть не меньше 1")
     if args.min_chapters < 0 or args.retries < 1 or args.progress_every < 1:
         raise SystemExit("--min-chapters должен быть >= 0, --retries и --progress-every — >= 1")
-    conn = database(args.db)
+    conn = database(args.db, clean=args.clean)
     try:
         print("Собираю ссылки каталога...")
         collect_links(conn, RateLimiter(args.delay), args)
